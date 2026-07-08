@@ -161,6 +161,7 @@ def scan():
         found += 1
 
         symbol = (pair.get("baseToken") or {}).get("symbol", "?")
+token_ca = (pair.get("baseToken") or {}).get("address", "?")
         dex_url = pair.get("url", "")
         chain_label = "🟣 Solana" if "sol" in chain.lower() else "🔵 Base"
         buys5m = ((pair.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0
@@ -171,6 +172,7 @@ def scan():
         msg = (
             f"{grade_emoji} <b>YENİ TOKEN — Grade {grade} ({score}/100)</b>\n\n"
             f"🪙 <b>{symbol}</b> · {chain_label}\n"
+f"📋 <code>{token_ca}</code>\n"
             f"⏱ Yaş: {age_min:.0f} dk\n\n"
             f"💰 Likidite: {fmt(liq)}\n"
             f"📊 5dk Hacim: {fmt(vol5m)}\n"
