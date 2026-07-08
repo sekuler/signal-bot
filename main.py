@@ -81,12 +81,12 @@ def score_token(pair):
         grade = "D"
     return score, grade, reasons
 
+
 def fetch_pairs():
     results = []
     for chain in ["solana", "base"]:
         try:
-            url = f"https://api.dexscreener.com/token-profiles/latest/v1"
-            r = requests.get(url, timeout=10)
+            r = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10)
             if r.ok:
                 profiles = r.json() or []
                 addrs = [p.get("tokenAddress") for p in profiles if p.get("chainId") == chain and p.get("tokenAddress")]
@@ -103,6 +103,7 @@ def fetch_pairs():
     print(f"Toplam {len(results)} pair çekildi")
     return results
 
+
 def send_telegram(msg):
     try:
         requests.post(
@@ -113,6 +114,7 @@ def send_telegram(msg):
     except Exception as e:
         print(f"TG hata: {e}")
 
+
 def fmt(n):
     if not n:
         return "?"
@@ -121,6 +123,7 @@ def fmt(n):
     if n >= 1000:
         return f"${n/1000:.0f}K"
     return f"${n:.0f}"
+
 
 def scan():
     now_ms = time.time() * 1000
@@ -135,7 +138,6 @@ def scan():
 
         created = pair.get("pairCreatedAt") or 0
         age_min = (now_ms - created) / 60000 if created else 999
-
         liq = (pair.get("liquidity") or {}).get("usd", 0) or 0
         vol5m = (pair.get("volume") or {}).get("m5", 0) or 0
         change5m = (pair.get("priceChange") or {}).get("m5", 0) or 0
@@ -161,7 +163,7 @@ def scan():
         found += 1
 
         symbol = (pair.get("baseToken") or {}).get("symbol", "?")
-token_ca = (pair.get("baseToken") or {}).get("address", "?")
+        token_ca = (pair.get("baseToken") or {}).get("address", "?")
         dex_url = pair.get("url", "")
         chain_label = "🟣 Solana" if "sol" in chain.lower() else "🔵 Base"
         buys5m = ((pair.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0
@@ -172,7 +174,7 @@ token_ca = (pair.get("baseToken") or {}).get("address", "?")
         msg = (
             f"{grade_emoji} <b>YENİ TOKEN — Grade {grade} ({score}/100)</b>\n\n"
             f"🪙 <b>{symbol}</b> · {chain_label}\n"
-f"📋 <code>{token_ca}</code>\n"
+            f"📋 <code>{token_ca}</code>\n"
             f"⏱ Yaş: {age_min:.0f} dk\n\n"
             f"💰 Likidite: {fmt(liq)}\n"
             f"📊 5dk Hacim: {fmt(vol5m)}\n"
@@ -187,17 +189,19 @@ f"📋 <code>{token_ca}</code>\n"
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti — {found} yeni token")
 
+
 def main():
     print("=" * 50)
-    print("  SIGNAL Bot v3")
+    print("  SIGNAL Bot v4")
     print("=" * 50)
-    send_telegram("🤖 <b>SIGNAL Bot v3 başlatıldı</b>\n\nSolana + Base takip ediliyor 🚀")
+    send_telegram("🤖 <b>SIGNAL Bot v4 başlatıldı</b>\n\nSolana + Base takip ediliyor 🚀")
     while True:
         try:
             scan()
         except Exception as e:
             print(f"Hata: {e}")
         time.sleep(SCAN_INTERVAL)
+
 
 if __name__ == "__main__":
     main()
