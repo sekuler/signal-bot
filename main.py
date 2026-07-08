@@ -7,7 +7,40 @@ CHAT_ID = "1590986571"
 SCAN_INTERVAL = 90
 MIN_SCORE = 40
 seen = set()
-pending = {}  # 60 saniye bekleme için
+pending = {}
+
+
+def check_socials(pair):
+    """DexScreener'dan sosyal medya kontrolü"""
+    bonus = 0
+    warnings = []
+    info = pair.get("info") or {}
+    socials = info.get("socials") or []
+    websites = info.get("websites") or []
+
+    has_twitter = any(s.get("type") == "twitter" for s in socials)
+    has_telegram = any(s.get("type") == "telegram" for s in socials)
+    has_website = len(websites) > 0
+
+    if not has_twitter and not has_telegram and not has_website:
+        warnings.append("🚨 Sosyal medya yok — yüksek rug riski!")
+        return -20, warnings
+
+    if has_twitter:
+        bonus += 8
+    if has_telegram:
+        bonus += 5
+    if has_website:
+        bonus += 7
+
+    if not has_twitter:
+        warnings.append("⚠️ Twitter/X hesabı yok")
+    if not has_telegram:
+        warnings.append("⚠️ Telegram yok")
+    if not has_website:
+        warnings.append("⚠️ Website yok")
+
+    return bonus, warnings
 
 
 def rugcheck_solana(token_address):
@@ -22,9 +55,8 @@ def rugcheck_solana(token_address):
 
         data = r.json()
 
-        # 1. Dev cüzdan geçmişi
-        creator = data.get("creator", {}) or {}
-        creator_tokens = creator.get("tokens", []) or []
+        creator = data.get("creator") or {}
+        creator_tokens = creator.get("tokens") or []
         rug_count = sum(1 for t in creator_tokens if t.get("rugged", False))
         total_created = len(creator_tokens)
 
@@ -32,31 +64,25 @@ def rugcheck_solana(token_address):
             warnings.append(f"🚨 Dev daha önce {rug_count} rug yapmış!")
             penalty += 50
         if total_created > 10:
-            warnings.append(f"⚠️ Dev bugüne kadar {total_created} token çıkarmış")
+            warnings.append(f"⚠️ Dev {total_created} token çıkarmış")
             penalty += 20
 
-        # 2. Holder dağılımı
-        top_holders = data.get("topHolders", []) or []
+        top_holders = data.get("topHolders") or []
         if top_holders:
             top10_pct = sum(h.get("pct", 0) for h in top_holders[:10])
             if top10_pct > 50:
-                warnings.append(f"🚨 Top 10 holder arzın %{top10_pct:.0f}'ini tutuyor!")
+                warnings.append(f"🚨 Top 10 holder %{top10_pct:.0f} tutuyor!")
                 penalty += 40
             elif top10_pct > 25:
                 warnings.append(f"⚠️ Top 10 holder %{top10_pct:.0f} tutuyor")
                 penalty += 20
 
-        # 3. Bundle wallet tespiti
-        insider_pct = 0
-        for h in top_holders:
-            if h.get("insider", False):
-                insider_pct += h.get("pct", 0)
+        insider_pct = sum(h.get("pct", 0) for h in top_holders if h.get("insider", False))
         if insider_pct > 10:
-            warnings.append(f"🚨 Bundle/insider cüzdanlar arzın %{insider_pct:.0f}'ini tutuyor!")
+            warnings.append(f"🚨 Bundle/insider %{insider_pct:.0f} tutuyor!")
             penalty += 40
 
-        # 4. LP kilidi
-        markets = data.get("markets", []) or []
+        markets = data.get("markets") or []
         lp_locked = any(m.get("lp", {}).get("locked", False) for m in markets)
         if not lp_locked:
             warnings.append("⚠️ LP kilidi yok")
@@ -64,14 +90,12 @@ def rugcheck_solana(token_address):
         else:
             score_bonus += 10
 
-        # 5. Genel RugCheck skoru
         rugcheck_score = data.get("score", 0)
         if rugcheck_score < 500:
-            warnings.append(f"⚠️ RugCheck skoru düşük: {rugcheck_score}")
+            warnings.append(f"⚠️ RugCheck skoru: {rugcheck_score}")
             penalty += 15
 
-        # 6. Risk listesi
-        risks = data.get("risks", []) or []
+        risks = data.get("risks") or []
         for risk in risks:
             level = risk.get("level", "")
             name = risk.get("name", "")
@@ -99,21 +123,18 @@ def tokensniffer_base(token_address):
             return warnings, penalty, score_bonus
 
         data = r.json()
-        is_honeypot = data.get("is_honeypot", False)
-        rugged = data.get("rugged", False)
-        ts_score = data.get("score", 100)
-
-        if is_honeypot:
+        if data.get("is_honeypot"):
             warnings.append("🚨 HONEYPOT — satış engellenmiş!")
             penalty += 100
-        if rugged:
-            warnings.append("🚨 Bu kontrat daha önce rug yapmış!")
+        if data.get("rugged"):
+            warnings.append("🚨 Daha önce rug yapmış!")
             penalty += 100
+        ts_score = data.get("score", 100)
         if ts_score < 30:
-            warnings.append(f"🚨 Token Sniffer skoru: {ts_score}/100")
+            warnings.append(f"🚨 Token Sniffer: {ts_score}/100")
             penalty += 40
         elif ts_score < 60:
-            warnings.append(f"⚠️ Token Sniffer skoru: {ts_score}/100")
+            warnings.append(f"⚠️ Token Sniffer: {ts_score}/100")
             penalty += 15
         else:
             score_bonus += 10
@@ -125,14 +146,11 @@ def tokensniffer_base(token_address):
 
 
 def check_momentum(pair):
-    """Holder ve işlem sayısı artıyor mu kontrol et"""
     bonus = 0
     notes = []
     buys5m = ((pair.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0
-    buys1h = ((pair.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0
     sells5m = ((pair.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0
 
-    # Son 5 dakikada işlem yoğunluğu
     if buys5m > 50:
         bonus += 10
         notes.append("🔥 Çok yoğun alım (50+ tx/5dk)")
@@ -140,7 +158,6 @@ def check_momentum(pair):
         bonus += 5
         notes.append("📈 Yoğun alım (20+ tx/5dk)")
 
-    # Buy/sell oranı
     total = buys5m + sells5m
     if total > 0:
         ratio = buys5m / total
@@ -160,10 +177,8 @@ def score_token(pair):
     liq = (pair.get("liquidity") or {}).get("usd", 0) or 0
     vol5m = (pair.get("volume") or {}).get("m5", 0) or 0
     change5m = (pair.get("priceChange") or {}).get("m5", 0) or 0
-    change1h = (pair.get("priceChange") or {}).get("h1", 0) or 0
     age_min = pair.get("_age_minutes", 60)
 
-    # Likidite (min 15 SOL ~ $2000, ideal $50K+)
     if liq >= 500000:
         score += 25
         reasons.append("💰 Yüksek likidite ($500K+)")
@@ -177,7 +192,6 @@ def score_token(pair):
         score += 8
         reasons.append("💰 Düşük likidite ($20K+)")
 
-    # Hacim/likidite oranı
     vol_ratio = vol5m / liq if liq > 0 else 0
     if vol_ratio > 0.30:
         score += 20
@@ -189,7 +203,6 @@ def score_token(pair):
         score += 6
         reasons.append("📊 Normal hacim")
 
-    # Fiyat hareketi
     if change5m > 20:
         score += 15
         reasons.append("🚀 +%20 fiyat hareketi")
@@ -200,7 +213,6 @@ def score_token(pair):
         score += 5
         reasons.append("📈 Pozitif momentum")
 
-    # Yaş bonusu (60sn bekleme sonrası)
     if age_min < 5:
         score += 5
         reasons.append("⚡ Çok yeni (<5dk)")
@@ -211,8 +223,7 @@ def score_token(pair):
         score += 5
         reasons.append("🕐 Taze (<30dk)")
 
-    score = max(0, min(100, score))
-    return score, reasons
+    return max(0, min(100, score)), reasons
 
 
 def fetch_pairs():
@@ -272,12 +283,10 @@ def scan():
 
         created = pair.get("pairCreatedAt") or 0
         age_min = (now_ms - created) / 60000 if created else 999
-
         liq = (pair.get("liquidity") or {}).get("usd", 0) or 0
         vol5m = (pair.get("volume") or {}).get("m5", 0) or 0
         change5m = (pair.get("priceChange") or {}).get("m5", 0) or 0
 
-        # Temel filtreler
         if age_min > 360:
             continue
         if liq < 20000:
@@ -287,24 +296,34 @@ def scan():
         if change5m < 1.0:
             continue
 
-        # 60 saniye bekleme — ilk rug dalgasını atlatmak
+        # Sosyal medya kontrolü — sosyal medyası hiç yoksa direkt atla
+        social_bonus, social_warnings = check_socials(pair)
+        if social_bonus == -20:
+            seen.add(addr)
+            print(f"[SKIP] Sosyal medya yok: {(pair.get('baseToken') or {}).get('symbol')}")
+            continue
+
+        # 60 saniye bekleme
         if addr not in pending:
             pending[addr] = {"first_seen": now_s, "pair": pair}
             print(f"[PENDING] {(pair.get('baseToken') or {}).get('symbol')} — 60sn bekleniyor")
             continue
 
-        wait_time = now_s - pending[addr]["first_seen"]
-        if wait_time < 60:
+        if time.time() - pending[addr]["first_seen"] < 60:
             continue
 
-        # 60 saniye geçti, analiz et
         pair["_age_minutes"] = age_min
         score, reasons = score_token(pair)
 
-        # Momentum kontrolü
+        # Momentum
         mom_bonus, mom_notes = check_momentum(pair)
         score += mom_bonus
         reasons.extend(mom_notes)
+
+        # Sosyal medya bonusu
+        score += social_bonus
+        if social_warnings:
+            reasons.extend(social_warnings)
 
         token_ca = (pair.get("baseToken") or {}).get("address", "")
 
@@ -318,11 +337,10 @@ def scan():
         elif chain == "base" and token_ca:
             rug_warnings, penalty, rug_bonus = tokensniffer_base(token_ca)
 
-        # Honeypot veya kritik rug varsa direkt atla
         if any("HONEYPOT" in w or ("🚨" in w and "rug" in w.lower()) for w in rug_warnings):
             seen.add(addr)
             pending.pop(addr, None)
-            print(f"[SKIP] Kritik rug riski: {(pair.get('baseToken') or {}).get('symbol')}")
+            print(f"[SKIP] Kritik rug: {(pair.get('baseToken') or {}).get('symbol')}")
             continue
 
         if penalty >= 60:
@@ -331,7 +349,6 @@ def scan():
             print(f"[SKIP] Yüksek penalty ({penalty}): {(pair.get('baseToken') or {}).get('symbol')}")
             continue
 
-        # Final skor
         score = max(0, min(100, score - penalty + rug_bonus))
 
         if score < MIN_SCORE:
@@ -343,19 +360,14 @@ def scan():
         pending.pop(addr, None)
         found += 1
 
-        # Grade
         if score >= 70:
-            grade = "S"
-            grade_emoji = "🏆"
+            grade, grade_emoji = "S", "🏆"
         elif score >= 55:
-            grade = "A"
-            grade_emoji = "🥇"
+            grade, grade_emoji = "A", "🥇"
         elif score >= 40:
-            grade = "B"
-            grade_emoji = "🥈"
+            grade, grade_emoji = "B", "🥈"
         else:
-            grade = "C"
-            grade_emoji = "🥉"
+            grade, grade_emoji = "C", "🥉"
 
         symbol = (pair.get("baseToken") or {}).get("symbol", "?")
         dex_url = pair.get("url", "")
@@ -364,10 +376,22 @@ def scan():
         sells5m = ((pair.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0
         reasons_txt = "\n".join(f"  • {r}" for r in reasons[:5])
 
+        info = pair.get("info") or {}
+        socials = info.get("socials") or []
+        websites = info.get("websites") or []
+        social_links = ""
+        for s in socials:
+            if s.get("type") == "twitter":
+                social_links += f"  🐦 <a href='{s.get('url')}'>Twitter</a>\n"
+            elif s.get("type") == "telegram":
+                social_links += f"  ✈️ <a href='{s.get('url')}'>Telegram</a>\n"
+        if websites:
+            social_links += f"  🌐 <a href='{websites[0].get('url')}'>Website</a>\n"
+
         if rug_warnings:
-            rug_txt = "\n\n⚠️ <b>Rug Uyarıları:</b>\n" + "\n".join(f"  {w}" for w in rug_warnings[:4])
+            rug_txt = "\n⚠️ <b>Rug Uyarıları:</b>\n" + "\n".join(f"  {w}" for w in rug_warnings[:4])
         else:
-            rug_txt = "\n\n✅ <b>Rug kontrolleri temiz</b>"
+            rug_txt = "\n✅ <b>Rug kontrolleri temiz</b>"
 
         msg = (
             f"{grade_emoji} <b>YENİ TOKEN — Grade {grade} ({score}/100)</b>\n\n"
@@ -380,6 +404,7 @@ def scan():
             f"👥 Buy/Sell: {buys5m} / {sells5m}\n\n"
             f"<b>Sinyal nedenleri:</b>\n{reasons_txt}"
             f"{rug_txt}\n\n"
+            f"<b>Sosyal Medya:</b>\n{social_links if social_links else '  Bulunamadı'}\n"
             f"🔗 <a href='{dex_url}'>DexScreener'da gör</a>"
         )
 
@@ -391,17 +416,14 @@ def scan():
 
 def main():
     print("=" * 50)
-    print("  SIGNAL Bot v6 — Gelişmiş Rug Filtreli")
+    print("  SIGNAL Bot v7 — Sosyal Medya Filtreli")
     print("=" * 50)
     send_telegram(
-        "🤖 <b>SIGNAL Bot v6 başlatıldı</b>\n\n"
+        "🤖 <b>SIGNAL Bot v7 başlatıldı</b>\n\n"
         "Yeni filtreler:\n"
-        "  ✅ Dev geçmişi kontrolü\n"
-        "  ✅ Holder dağılımı (%25+ uyarısı)\n"
-        "  ✅ Bundle wallet tespiti\n"
-        "  ✅ LP kilit kontrolü\n"
-        "  ✅ 60 saniye bekleme\n"
-        "  ✅ Momentum analizi\n\n"
+        "  ✅ Sosyal medya kontrolü\n"
+        "  ✅ Twitter/Telegram/Website linki\n"
+        "  ✅ Sosyal medyası olmayan tokenler eleniyor\n\n"
         "Solana + Base takip ediliyor 🚀"
     )
     while True:
