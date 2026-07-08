@@ -8,6 +8,62 @@ SCAN_INTERVAL = 60
 MIN_GRADE = "C"
 seen = set()
 
+
+def check_rugcheck_solana(token_address):
+    warnings = []
+    penalty = 0
+    try:
+        url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
+        r = requests.get(url, timeout=8)
+        if r.ok:
+            data = r.json()
+            score = data.get("score", 0)
+            risks = data.get("risks", [])
+            for risk in risks:
+                name = risk.get("name", "")
+                level = risk.get("level", "")
+                if level in ["danger", "critical"]:
+                    warnings.append(f"🚨 {name}")
+                    penalty += 30
+                elif level == "warn":
+                    warnings.append(f"⚠️ {name}")
+                    penalty += 10
+            if score < 500:
+                warnings.append(f"⚠️ RugCheck skoru düşük ({score})")
+                penalty += 20
+    except Exception as e:
+        warnings.append("⚠️ RugCheck kontrol edilemedi")
+    return warnings, penalty
+
+
+def check_tokensniffer_base(token_address):
+    warnings = []
+    penalty = 0
+    try:
+        url = f"https://tokensniffer.com/api/v2/tokens/8453/{token_address}?apikey=free&include_metrics=true"
+        r = requests.get(url, timeout=8)
+        if r.ok:
+            data = r.json()
+            is_honeypot = data.get("is_honeypot", False)
+            rugged = data.get("rugged", False)
+            score = data.get("score", 100)
+            if is_honeypot:
+                warnings.append("🚨 HONEYPOT — satış engellenmiş!")
+                penalty += 100
+            if rugged:
+                warnings.append("🚨 Daha önce rug yapmış!")
+                penalty += 100
+            if score < 30:
+                warnings.append(f"⚠️ Token Sniffer skoru: {score}/100")
+                penalty += 30
+            elif score < 60:
+                warnings.append(f"⚠️ Token Sniffer skoru orta: {score}/100")
+                penalty += 10
+    except Exception as e:
+        warnings.append("⚠️ Token Sniffer kontrol edilemedi")
+    return warnings, penalty
+
+
 def score_token(pair):
     score = 0
     reasons = []
@@ -159,17 +215,41 @@ def scan():
             seen.add(addr)
             continue
 
+        token_ca = (pair.get("baseToken") or {}).get("address", "")
+
+        # Rug kontrolleri
+        rug_warnings = []
+        penalty = 0
+        if chain == "solana" and token_ca:
+            rug_warnings, penalty = check_rugcheck_solana(token_ca)
+        elif chain == "base" and token_ca:
+            rug_warnings, penalty = check_tokensniffer_base(token_ca)
+
+        # Honeypot veya çok yüksek penalty varsa atla
+        if any("HONEYPOT" in w for w in rug_warnings):
+            seen.add(addr)
+            print(f"[SKIP] Honeypot: {(pair.get('baseToken') or {}).get('symbol')}")
+            continue
+        if penalty >= 60:
+            seen.add(addr)
+            print(f"[SKIP] Yüksek rug riski ({penalty}): {(pair.get('baseToken') or {}).get('symbol')}")
+            continue
+
         seen.add(addr)
         found += 1
 
         symbol = (pair.get("baseToken") or {}).get("symbol", "?")
-        token_ca = (pair.get("baseToken") or {}).get("address", "?")
         dex_url = pair.get("url", "")
         chain_label = "🟣 Solana" if "sol" in chain.lower() else "🔵 Base"
         buys5m = ((pair.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0
         sells5m = ((pair.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0
         grade_emoji = {"S": "🏆", "A": "🥇", "B": "🥈", "C": "🥉"}.get(grade, "")
         reasons_txt = "\n".join(f"  • {r}" for r in reasons[:4])
+
+        if rug_warnings:
+            rug_txt = "\n\n⚠️ <b>Rug Uyarıları:</b>\n" + "\n".join(f"  {w}" for w in rug_warnings)
+        else:
+            rug_txt = "\n\n✅ <b>Rug kontrolleri temiz</b>"
 
         msg = (
             f"{grade_emoji} <b>YENİ TOKEN — Grade {grade} ({score}/100)</b>\n\n"
@@ -180,7 +260,8 @@ def scan():
             f"📊 5dk Hacim: {fmt(vol5m)}\n"
             f"📈 5dk Değişim: %{change5m:+.2f}\n"
             f"👥 Buy/Sell: {buys5m} / {sells5m}\n\n"
-            f"<b>Sinyal nedenleri:</b>\n{reasons_txt}\n\n"
+            f"<b>Sinyal nedenleri:</b>\n{reasons_txt}"
+            f"{rug_txt}\n\n"
             f"🔗 <a href='{dex_url}'>DexScreener'da gör</a>"
         )
 
@@ -192,9 +273,9 @@ def scan():
 
 def main():
     print("=" * 50)
-    print("  SIGNAL Bot v4")
+    print("  SIGNAL Bot v5 — Rug Filtreli")
     print("=" * 50)
-    send_telegram("🤖 <b>SIGNAL Bot v4 başlatıldı</b>\n\nSolana + Base takip ediliyor 🚀")
+    send_telegram("🤖 <b>SIGNAL Bot v5 başlatıldı</b>\n\n✅ RugCheck + Token Sniffer aktif\n\nSolana + Base takip ediliyor 🚀")
     while True:
         try:
             scan()
