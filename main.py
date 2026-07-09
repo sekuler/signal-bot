@@ -15,11 +15,11 @@ MAX_TOP10_HOLDER_PCT = 35
 MAX_BUNDLE_PCT       = 20
 MAX_CREATOR_RUGS     = 2
 MAX_CREATOR_HOLD_PCT = 20
-MIN_LIQUIDITY_USD    = 25000   # 50K → 25K
-MIN_VOLUME_5M        = 3000    # 5K → 3K
+MIN_LIQUIDITY_USD    = 25000
+MIN_VOLUME_5M        = 3000
 MIN_CHANGE_5M        = 3.0
-MIN_UNIQUE_BUYERS    = 10      # 20 → 10
-MIN_BUY_RATIO        = 0.65    # Yeni: min %65 alım baskısı
+MIN_UNIQUE_BUYERS    = 10
+MIN_BUY_RATIO        = 0.65
 MAX_AGE_MINUTES      = 360
 WAIT_SECONDS         = 60
 MIN_RISK_SCORE       = 65
@@ -396,7 +396,6 @@ def tokensniffer_base(token_address):
 
 
 def check_socials(pair):
-    """Sadece Twitter zorunlu, Telegram/Website yoksa uyarı ver ama eleme"""
     info    = pair.get("info") or {}
     socials = info.get("socials") or []
     webs    = info.get("websites") or []
@@ -459,7 +458,6 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
     elif change5m < -10:
         score -= 10; reasons.append("⚠️ Sert düşüş")
 
-    # 1 saatlik trend — pozitif olmalı
     if change1h > 50:
         score += 15; reasons.append("🚀 +%50 1sa trend")
     elif change1h > 20:
@@ -469,7 +467,6 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
     elif change1h < -20:
         score -= 10; reasons.append("⚠️ 1sa negatif trend")
 
-    # Buy/sell oranı
     total_tx = buys5m + sells5m
     if total_tx > 0:
         ratio = buys5m / total_tx
@@ -482,7 +479,6 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
         elif ratio < 0.40:
             score -= 10; reasons.append("⚠️ Satış baskısı")
 
-    # Unique buyers
     if unique_buyers > 50:
         score += 15; reasons.append(f"👤 {unique_buyers} benzersiz alıcı")
     elif unique_buyers > 20:
@@ -510,30 +506,57 @@ def fetch_pairs():
     results = []
     for chain in ["solana", "base"]:
         try:
+            # Token profiles endpoint
             r = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10)
-            if not r.ok:
-                continue
-            profiles = [p for p in (r.json() or []) if p.get("chainId") == chain and p.get("tokenAddress")]
-            addrs    = [p.get("tokenAddress") for p in profiles]
-            for i in range(0, len(addrs), 30):
-                batch = addrs[i:i+30]
+            if r.ok:
+                profiles = [p for p in (r.json() or []) if p.get("chainId") == chain and p.get("tokenAddress")]
+                addrs    = [p.get("tokenAddress") for p in profiles]
+                for i in range(0, len(addrs), 30):
+                    batch = addrs[i:i+30]
+                    try:
+                        r2 = requests.get(
+                            f"https://api.dexscreener.com/latest/dex/tokens/{','.join(batch)}",
+                            timeout=10
+                        )
+                        if r2.ok:
+                            pairs = r2.json().get("pairs") or []
+                            for p in pairs:
+                                p["_chain"] = chain
+                            results.extend(pairs)
+                        time.sleep(0.3)
+                    except Exception as e:
+                        print(f"[{chain}] batch hata: {e}")
+
+            # Fallback: search endpoint
+            for kw in ["pump", "new"]:
                 try:
-                    r2 = requests.get(
-                        f"https://api.dexscreener.com/latest/dex/tokens/{','.join(batch)}",
+                    r3 = requests.get(
+                        f"https://api.dexscreener.com/latest/dex/search?q={kw}&chainId={chain}",
                         timeout=10
                     )
-                    if r2.ok:
-                        pairs = r2.json().get("pairs") or []
+                    if r3.ok:
+                        pairs = r3.json().get("pairs") or []
                         for p in pairs:
                             p["_chain"] = chain
                         results.extend(pairs)
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                 except Exception as e:
-                    print(f"[{chain}] batch hata: {e}")
+                    print(f"[{chain}] search hata: {e}")
+
         except Exception as e:
             print(f"[{chain}] fetch hata: {e}")
-    print(f"Toplam {len(results)} pair çekildi")
-    return results
+
+    # Duplikat temizle
+    seen_pairs = set()
+    unique = []
+    for p in results:
+        addr = p.get("pairAddress", "")
+        if addr and addr not in seen_pairs:
+            seen_pairs.add(addr)
+            unique.append(p)
+
+    print(f"Toplam {len(unique)} pair çekildi")
+    return unique
 
 
 def send_telegram(msg):
@@ -575,30 +598,23 @@ def scan():
         buys5m   = ((pair.get("txns") or {}).get("m5") or {}).get("buys",  0) or 0
         sells5m  = ((pair.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0
 
-        # ELEME 1: Temel filtreler
         if age_min  > MAX_AGE_MINUTES:   continue
         if liq      < MIN_LIQUIDITY_USD: continue
         if vol5m    < MIN_VOLUME_5M:     continue
         if change5m < MIN_CHANGE_5M:     continue
+        if change1h < 0:                 continue
 
-        # ELEME 2: 1 saatlik trend pozitif olmalı
-        if change1h < 0:
-            continue
-
-        # ELEME 3: Buy/sell oranı
         total_tx  = buys5m + sells5m
         buy_ratio = buys5m / total_tx if total_tx > 0 else 0
         if buy_ratio < MIN_BUY_RATIO:
             continue
 
-        # ELEME 4: Twitter zorunlu
         social_bonus, social_warnings = check_socials(pair)
         if social_bonus == -999:
             seen.add(addr)
             print(f"[SKIP-SOSYAL] {(pair.get('baseToken') or {}).get('symbol')}")
             continue
 
-        # 60 saniye bekleme
         if addr not in pending:
             pending[addr] = {"first_seen": now_s, "buys_t0": buys5m}
             print(f"[PENDING] {(pair.get('baseToken') or {}).get('symbol')}")
@@ -610,7 +626,6 @@ def scan():
         pair_addr = pair.get("pairAddress", "")
         pair["_age_minutes"] = age_min
 
-        # ELEME 5: Mint/Freeze
         mf_warnings, mf_penalty = [], 0
         if chain == "solana" and token_ca:
             mf_warnings, mf_penalty = check_mint_freeze(token_ca)
@@ -619,14 +634,12 @@ def scan():
                 print(f"[SKIP-AUTH] {(pair.get('baseToken') or {}).get('symbol')}")
                 continue
 
-        # ELEME 6: Creator satış
         cs_warnings, cs_penalty = [], 0
         if chain == "solana" and token_ca:
             creator_addr, mint_time = get_creator_address(token_ca)
             if creator_addr and mint_time:
                 cs_warnings, cs_penalty = check_creator_sells(token_ca, creator_addr, mint_time)
 
-        # ELEME 7: RugCheck / TokenSniffer
         rug_warnings, rug_penalty, rug_bonus, api_ok = [], 0, 0, False
         if chain == "solana" and token_ca:
             rug_warnings, rug_penalty, rug_bonus, api_ok = rugcheck_solana(token_ca)
@@ -639,7 +652,6 @@ def scan():
             print(f"[SKIP-RUG] {(pair.get('baseToken') or {}).get('symbol')} penalty={total_penalty}")
             continue
 
-        # ELEME 8: Unique buyers
         unique_buyers = 0
         if chain == "solana" and pair_addr and token_ca:
             unique_buyers = get_unique_buyers(pair_addr, token_ca)
@@ -648,10 +660,8 @@ def scan():
             print(f"[SKIP-BUYERS] {(pair.get('baseToken') or {}).get('symbol')} uniq={unique_buyers}")
             continue
 
-        # Holder büyümesi
         growth_bonus, growth_note = check_holder_growth(addr, buys5m)
 
-        # Skorlar
         risk_score             = calc_risk_score(rug_penalty, rug_bonus, mf_penalty, social_bonus, api_ok)
         mom_score, mom_reasons = calc_momentum_score(pair, unique_buyers, growth_bonus, growth_note)
 
@@ -716,17 +726,15 @@ def scan():
 
 def main():
     print("=" * 55)
-    print("  SIGNAL Bot v13 — AVAJAK Dersleri")
+    print("  SIGNAL Bot v13")
     print("=" * 55)
     send_telegram(
         "🤖 <b>SIGNAL Bot v13 başlatıldı</b>\n\n"
-        "<b>AVAJAK derslerinden güncellemeler:</b>\n"
+        "  ✅ Fetch fallback eklendi\n"
         "  ✅ Min likidite $25K\n"
-        "  ✅ Min unique buyers 10\n"
-        "  ✅ Buy/sell oranı min %65 zorunlu\n"
-        "  ✅ 1 saatlik trend pozitif zorunlu\n"
-        "  ✅ Sadece Twitter zorunlu (TG/Web uyarı)\n"
-        "  ✅ RugCheck hata → token geçmez\n\n"
+        "  ✅ Buy oranı min %65\n"
+        "  ✅ 1sa trend pozitif zorunlu\n"
+        "  ✅ RugCheck hata → geçmez\n\n"
         "Solana + Base 🚀"
     )
     while True:
