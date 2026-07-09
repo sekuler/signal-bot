@@ -15,10 +15,11 @@ MAX_TOP10_HOLDER_PCT = 35
 MAX_BUNDLE_PCT       = 20
 MAX_CREATOR_RUGS     = 2
 MAX_CREATOR_HOLD_PCT = 20
-MIN_LIQUIDITY_USD    = 50000   # $21K → $50K
-MIN_VOLUME_5M        = 5000    # $2K → $5K
+MIN_LIQUIDITY_USD    = 25000   # 50K → 25K
+MIN_VOLUME_5M        = 3000    # 5K → 3K
 MIN_CHANGE_5M        = 3.0
-MIN_UNIQUE_BUYERS    = 20      # Yeni: min 20 benzersiz alıcı
+MIN_UNIQUE_BUYERS    = 10      # 20 → 10
+MIN_BUY_RATIO        = 0.65    # Yeni: min %65 alım baskısı
 MAX_AGE_MINUTES      = 360
 WAIT_SECONDS         = 60
 MIN_RISK_SCORE       = 65
@@ -137,7 +138,7 @@ def get_creator_address(token_address):
         tx = get_tx(sig)
         if not tx:
             return None, mint_time
-        keys  = (tx.get("transaction") or {}).get("message", {}).get("accountKeys") or []
+        keys = (tx.get("transaction") or {}).get("message", {}).get("accountKeys") or []
         if keys:
             first = keys[0]
             addr  = first.get("pubkey") if isinstance(first, dict) else str(first)
@@ -266,7 +267,7 @@ def rugcheck_solana(token_address):
         )
         if not r.ok:
             warnings.append("🚫 RugCheck yanıt vermedi!")
-            penalty += 100  # API hata → çok yüksek ceza, token geçmez
+            penalty += 100
             return warnings, penalty, bonus, api_success
 
         data        = r.json()
@@ -346,7 +347,7 @@ def rugcheck_solana(token_address):
     except Exception as e:
         print(f"RugCheck hata: {e}")
         warnings.append("🚫 RugCheck bağlantı hatası!")
-        penalty += 100  # Bağlantı hatası → token geçmez
+        penalty += 100
     return warnings, penalty, bonus, api_success
 
 
@@ -395,7 +396,7 @@ def tokensniffer_base(token_address):
 
 
 def check_socials(pair):
-    """Twitter + en az biri daha (Telegram veya Website) zorunlu"""
+    """Sadece Twitter zorunlu, Telegram/Website yoksa uyarı ver ama eleme"""
     info    = pair.get("info") or {}
     socials = info.get("socials") or []
     webs    = info.get("websites") or []
@@ -403,15 +404,10 @@ def check_socials(pair):
     has_tg  = any(s.get("type") == "telegram" for s in socials)
     has_web = len(webs) > 0
 
-    # Hiçbiri yoksa direkt ele
-    if not has_tw and not has_tg and not has_web:
+    if not has_tw:
         return -999, []
 
-    # Twitter yoksa veya Telegram+Website ikisi de yoksa ele
-    if not has_tw or (not has_tg and not has_web):
-        return -999, []
-
-    bonus    = (8 if has_tw else 0) + (5 if has_tg else 0) + (7 if has_web else 0)
+    bonus    = 8 + (5 if has_tg else 0) + (7 if has_web else 0)
     warnings = []
     if not has_tg:  warnings.append("⚠️ Telegram yok")
     if not has_web: warnings.append("⚠️ Website yok")
@@ -443,6 +439,8 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
         score += 10; reasons.append("💰 $100K+ likidite")
     elif liq >= 50000:
         score += 6;  reasons.append("💰 $50K+ likidite")
+    elif liq >= 25000:
+        score += 3;  reasons.append("💰 $25K+ likidite")
 
     vol_ratio = vol5m / liq if liq > 0 else 0
     if vol_ratio > 0.50:
@@ -461,21 +459,30 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
     elif change5m < -10:
         score -= 10; reasons.append("⚠️ Sert düşüş")
 
+    # 1 saatlik trend — pozitif olmalı
     if change1h > 50:
-        score += 10; reasons.append("📈 +%50 1sa trend")
+        score += 15; reasons.append("🚀 +%50 1sa trend")
     elif change1h > 20:
+        score += 10; reasons.append("📈 +%20 1sa trend")
+    elif change1h > 0:
         score += 5;  reasons.append("📈 Pozitif 1sa trend")
+    elif change1h < -20:
+        score -= 10; reasons.append("⚠️ 1sa negatif trend")
 
+    # Buy/sell oranı
     total_tx = buys5m + sells5m
     if total_tx > 0:
         ratio = buys5m / total_tx
         if ratio > 0.80:
-            score += 15; reasons.append(f"👥 Çok güçlü alım (%{ratio*100:.0f})")
+            score += 20; reasons.append(f"👥 Çok güçlü alım (%{ratio*100:.0f})")
+        elif ratio > 0.70:
+            score += 15; reasons.append(f"👥 Güçlü alım (%{ratio*100:.0f})")
         elif ratio > 0.65:
-            score += 8;  reasons.append(f"👥 Güçlü alım (%{ratio*100:.0f})")
+            score += 8;  reasons.append(f"👥 Alım baskısı (%{ratio*100:.0f})")
         elif ratio < 0.40:
             score -= 10; reasons.append("⚠️ Satış baskısı")
 
+    # Unique buyers
     if unique_buyers > 50:
         score += 15; reasons.append(f"👤 {unique_buyers} benzersiz alıcı")
     elif unique_buyers > 20:
@@ -564,7 +571,9 @@ def scan():
         liq      = (pair.get("liquidity")   or {}).get("usd", 0) or 0
         vol5m    = (pair.get("volume")      or {}).get("m5",  0) or 0
         change5m = (pair.get("priceChange") or {}).get("m5",  0) or 0
-        buys5m   = ((pair.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0
+        change1h = (pair.get("priceChange") or {}).get("h1",  0) or 0
+        buys5m   = ((pair.get("txns") or {}).get("m5") or {}).get("buys",  0) or 0
+        sells5m  = ((pair.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0
 
         # ELEME 1: Temel filtreler
         if age_min  > MAX_AGE_MINUTES:   continue
@@ -572,7 +581,17 @@ def scan():
         if vol5m    < MIN_VOLUME_5M:     continue
         if change5m < MIN_CHANGE_5M:     continue
 
-        # ELEME 2: Twitter + (Telegram veya Website) zorunlu
+        # ELEME 2: 1 saatlik trend pozitif olmalı
+        if change1h < 0:
+            continue
+
+        # ELEME 3: Buy/sell oranı
+        total_tx  = buys5m + sells5m
+        buy_ratio = buys5m / total_tx if total_tx > 0 else 0
+        if buy_ratio < MIN_BUY_RATIO:
+            continue
+
+        # ELEME 4: Twitter zorunlu
         social_bonus, social_warnings = check_socials(pair)
         if social_bonus == -999:
             seen.add(addr)
@@ -591,7 +610,7 @@ def scan():
         pair_addr = pair.get("pairAddress", "")
         pair["_age_minutes"] = age_min
 
-        # ELEME 3: Mint/Freeze
+        # ELEME 5: Mint/Freeze
         mf_warnings, mf_penalty = [], 0
         if chain == "solana" and token_ca:
             mf_warnings, mf_penalty = check_mint_freeze(token_ca)
@@ -600,14 +619,14 @@ def scan():
                 print(f"[SKIP-AUTH] {(pair.get('baseToken') or {}).get('symbol')}")
                 continue
 
-        # ELEME 4: Creator satış
+        # ELEME 6: Creator satış
         cs_warnings, cs_penalty = [], 0
         if chain == "solana" and token_ca:
             creator_addr, mint_time = get_creator_address(token_ca)
             if creator_addr and mint_time:
                 cs_warnings, cs_penalty = check_creator_sells(token_ca, creator_addr, mint_time)
 
-        # ELEME 5: RugCheck / TokenSniffer — hata verirse token geçmez
+        # ELEME 7: RugCheck / TokenSniffer
         rug_warnings, rug_penalty, rug_bonus, api_ok = [], 0, 0, False
         if chain == "solana" and token_ca:
             rug_warnings, rug_penalty, rug_bonus, api_ok = rugcheck_solana(token_ca)
@@ -620,11 +639,10 @@ def scan():
             print(f"[SKIP-RUG] {(pair.get('baseToken') or {}).get('symbol')} penalty={total_penalty}")
             continue
 
-        # ELEME 6: Unique buyers
+        # ELEME 8: Unique buyers
         unique_buyers = 0
         if chain == "solana" and pair_addr and token_ca:
             unique_buyers = get_unique_buyers(pair_addr, token_ca)
-
         if unique_buyers < MIN_UNIQUE_BUYERS and chain == "solana":
             seen.add(addr); pending.pop(addr, None)
             print(f"[SKIP-BUYERS] {(pair.get('baseToken') or {}).get('symbol')} uniq={unique_buyers}")
@@ -651,7 +669,6 @@ def scan():
         symbol      = (pair.get("baseToken") or {}).get("symbol", "?")
         dex_url     = pair.get("url", "")
         chain_label = "🟣 Solana" if "sol" in chain.lower() else "🔵 Base"
-        sells5m     = ((pair.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0
 
         risk_icon = "🟢" if risk_score >= 75 else "🟡" if risk_score >= 55 else "🔴"
         mom_icon  = "🔥" if mom_score  >= 70 else "📈" if mom_score  >= 45 else "📊"
@@ -683,8 +700,8 @@ def scan():
             f"{mom_icon} <b>Momentum: {mom_score}/100</b>\n\n"
             f"💰 Likidite: {fmt(liq)}\n"
             f"📊 5dk Hacim: {fmt(vol5m)}{ub_note}\n"
-            f"📈 5dk Değişim: %{change5m:+.2f}\n"
-            f"👥 Buy/Sell: {buys5m} / {sells5m}\n\n"
+            f"📈 5dk: %{change5m:+.2f}  |  1sa: %{change1h:+.2f}\n"
+            f"👥 Buy/Sell: {buys5m}/{sells5m} (%{buy_ratio*100:.0f} buy)\n\n"
             f"<b>Momentum:</b>\n{mom_txt}"
             f"{warn_txt}\n\n"
             f"{links}\n"
@@ -692,23 +709,24 @@ def scan():
         )
 
         send_telegram(msg)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {symbol} Risk:{risk_score} Mom:{mom_score} Uniq:{unique_buyers}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {symbol} Risk:{risk_score} Mom:{mom_score} Buy%:{buy_ratio*100:.0f} Uniq:{unique_buyers}")
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti — {found} yeni token")
 
 
 def main():
     print("=" * 55)
-    print("  SIGNAL Bot v12")
+    print("  SIGNAL Bot v13 — AVAJAK Dersleri")
     print("=" * 55)
     send_telegram(
-        "🤖 <b>SIGNAL Bot v12 başlatıldı</b>\n\n"
-        "<b>Pepe/fatcat derslerinden güncellemeler:</b>\n"
-        "  ✅ Min likidite $21K → $50K\n"
-        "  ✅ Min unique buyers 20 (Solana)\n"
-        "  ✅ Twitter + Telegram veya Website zorunlu\n"
-        "  ✅ RugCheck hata → token KESİNLİKLE geçmez\n"
-        "  ✅ API penalty 40 → 100\n\n"
+        "🤖 <b>SIGNAL Bot v13 başlatıldı</b>\n\n"
+        "<b>AVAJAK derslerinden güncellemeler:</b>\n"
+        "  ✅ Min likidite $25K\n"
+        "  ✅ Min unique buyers 10\n"
+        "  ✅ Buy/sell oranı min %65 zorunlu\n"
+        "  ✅ 1 saatlik trend pozitif zorunlu\n"
+        "  ✅ Sadece Twitter zorunlu (TG/Web uyarı)\n"
+        "  ✅ RugCheck hata → token geçmez\n\n"
         "Solana + Base 🚀"
     )
     while True:
