@@ -4,7 +4,6 @@ import requests
 from datetime import datetime
 from pathlib import Path
 
-# ─── AYARLAR ───────────────────────────────────────────────
 TELEGRAM_TOKEN       = "8892190725:AAFmzgGnH5L-ZDmepaIA1uYpxM5Bbzy7X4A"
 CHAT_ID              = "1590986571"
 SCAN_INTERVAL        = 90
@@ -18,13 +17,12 @@ MAX_CREATOR_HOLD_PCT = 20
 MIN_LIQUIDITY_USD    = 25000
 MIN_VOLUME_5M        = 3000
 MIN_CHANGE_5M        = 3.0
-MIN_UNIQUE_BUYERS    = 10
-MIN_BUY_RATIO        = 0.65
+MIN_UNIQUE_BUYERS    = 5
+MIN_BUY_RATIO        = 0.60
 MAX_AGE_MINUTES      = 360
 WAIT_SECONDS         = 60
-MIN_RISK_SCORE       = 65
-MIN_MOMENTUM_SCORE   = 30
-# ───────────────────────────────────────────────────────────
+MIN_RISK_SCORE       = 55
+MIN_MOMENTUM_SCORE   = 25
 
 _rpc_cache = {}
 CACHE_TTL  = 300
@@ -59,7 +57,6 @@ def save_seen(seen):
 seen    = load_seen()
 pending = {}
 
-
 def solana_rpc(method, params):
     try:
         r = requests.post(SOLANA_RPC, json={
@@ -79,7 +76,6 @@ def get_tx(signature):
         f"tx:{signature}"
     )
 
-
 def check_mint_freeze(token_address):
     warnings = []
     penalty  = 0
@@ -90,36 +86,22 @@ def check_mint_freeze(token_address):
             f"acct:{token_address}"
         )
         if not result:
-            warnings.append("⚠️ Mint account alınamadı")
-            penalty += 10
             return warnings, penalty
-
         data   = (result.get("value") or {}).get("data") or {}
         parsed = data.get("parsed") or {} if isinstance(data, dict) else {}
         ptype  = parsed.get("type", "")
         info   = parsed.get("info") or {}
-
         if ptype != "mint":
-            warnings.append("⚠️ Mint account doğrulanamadı")
-            penalty += 15
             return warnings, penalty
-
         if info.get("mintAuthority"):
             warnings.append("🚨 Mint Authority AÇIK!")
             penalty += 60
         if info.get("freezeAuthority"):
             warnings.append("🚨 Freeze Authority AÇIK!")
             penalty += 60
-        if info.get("decimals") == 0:
-            warnings.append("⚠️ Decimals=0")
-            penalty += 10
-
     except Exception as e:
         print(f"Mint/Freeze hata: {e}")
-        warnings.append("⚠️ Mint/Freeze kontrol edilemedi")
-        penalty += 10
     return warnings, penalty
-
 
 def get_creator_address(token_address):
     try:
@@ -147,7 +129,6 @@ def get_creator_address(token_address):
         print(f"Creator tespit hata: {e}")
     return None, 0
 
-
 def check_creator_sells(token_address, creator_address, mint_time):
     warnings = []
     penalty  = 0
@@ -161,12 +142,10 @@ def check_creator_sells(token_address, creator_address, mint_time):
         )
         if not creator_sigs:
             return warnings, penalty
-
         early_sigs = [
             s for s in creator_sigs
             if s.get("blockTime") and mint_time <= s.get("blockTime") <= mint_time + 300
         ]
-
         sell_count = 0
         for sig_info in early_sigs[:10]:
             sig = sig_info.get("signature")
@@ -177,28 +156,23 @@ def check_creator_sells(token_address, creator_address, mint_time):
                 continue
             pre_balances  = (tx.get("meta") or {}).get("preTokenBalances",  []) or []
             post_balances = (tx.get("meta") or {}).get("postTokenBalances", []) or []
-
             pre_amt  = next((b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
-                             for b in pre_balances  if b.get("owner") == creator_address
+                             for b in pre_balances if b.get("owner") == creator_address
                              and b.get("mint") == token_address), 0)
             post_amt = next((b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
                              for b in post_balances if b.get("owner") == creator_address
                              and b.get("mint") == token_address), 0)
-
             if pre_amt > 0 and post_amt < pre_amt:
                 sell_count += 1
-
         if sell_count >= 3:
             warnings.append(f"🚨 Creator ilk 5dk'da {sell_count} satış!")
             penalty += 60
         elif sell_count >= 1:
             warnings.append(f"⚠️ Creator ilk 5dk'da {sell_count} satış")
             penalty += 25
-
     except Exception as e:
         print(f"Creator sells hata: {e}")
     return warnings, penalty
-
 
 def get_unique_buyers(pair_address, token_address):
     if not token_address:
@@ -211,11 +185,9 @@ def get_unique_buyers(pair_address, token_address):
         )
         if not sigs:
             return 0
-
         now      = time.time()
         five_min = now - 300
         recent   = [s for s in sigs if (s.get("blockTime") or 0) > five_min]
-
         unique_buyers = set()
         for sig_info in recent[:20]:
             sig = sig_info.get("signature")
@@ -225,7 +197,7 @@ def get_unique_buyers(pair_address, token_address):
             if not tx:
                 continue
             pre_map  = {b.get("owner"): b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
-                        for b in ((tx.get("meta") or {}).get("preTokenBalances",  []) or [])
+                        for b in ((tx.get("meta") or {}).get("preTokenBalances", []) or [])
                         if b.get("mint") == token_address}
             post_map = {b.get("owner"): b.get("uiTokenAmount", {}).get("uiAmount", 0) or 0
                         for b in ((tx.get("meta") or {}).get("postTokenBalances", []) or [])
@@ -234,12 +206,10 @@ def get_unique_buyers(pair_address, token_address):
                 pre_amt = pre_map.get(owner, 0)
                 if post_amt > pre_amt and owner:
                     unique_buyers.add(owner)
-
         return len(unique_buyers)
     except Exception as e:
         print(f"Unique buyers hata: {e}")
     return 0
-
 
 def check_holder_growth(addr, current_buys):
     if addr not in pending:
@@ -253,7 +223,6 @@ def check_holder_growth(addr, current_buys):
     elif growth > 3:
         return 3,  f"📈 60sn'de +{growth} alım tx"
     return 0, ""
-
 
 def rugcheck_solana(token_address):
     warnings    = []
@@ -269,15 +238,12 @@ def rugcheck_solana(token_address):
             warnings.append("🚫 RugCheck yanıt vermedi!")
             penalty += 100
             return warnings, penalty, bonus, api_success
-
         data        = r.json()
         api_success = True
-
         creator        = data.get("creator") or {}
         creator_tokens = creator.get("tokens") or []
         rug_count      = sum(1 for t in creator_tokens if t.get("rugged", False))
         total_created  = len(creator_tokens)
-
         if rug_count >= MAX_CREATOR_RUGS:
             warnings.append(f"🚨 Dev {rug_count} rug yapmış!")
             penalty += 100
@@ -287,7 +253,6 @@ def rugcheck_solana(token_address):
         if total_created > 15:
             warnings.append(f"⚠️ Dev {total_created} token çıkarmış")
             penalty += 15
-
         creator_addr = creator.get("address", "")
         top_holders  = data.get("topHolders") or []
         creator_hold = next(
@@ -299,7 +264,6 @@ def rugcheck_solana(token_address):
         elif creator_hold > 10:
             warnings.append(f"⚠️ Creator %{creator_hold:.0f} tutuyor")
             penalty += 20
-
         if top_holders:
             top10_pct = sum(h.get("pct", 0) for h in top_holders[:10])
             if top10_pct > MAX_TOP10_HOLDER_PCT:
@@ -308,7 +272,6 @@ def rugcheck_solana(token_address):
             elif top10_pct > 25:
                 warnings.append(f"⚠️ Top10 holder %{top10_pct:.0f}")
                 penalty += 20
-
         insider_pct = sum(h.get("pct", 0) for h in top_holders if h.get("insider", False))
         if insider_pct > MAX_BUNDLE_PCT:
             warnings.append(f"🚨 Bundle/insider %{insider_pct:.0f}!")
@@ -316,7 +279,6 @@ def rugcheck_solana(token_address):
         elif insider_pct > 10:
             warnings.append(f"⚠️ Insider %{insider_pct:.0f}")
             penalty += 20
-
         markets   = data.get("markets") or []
         lp_burned = any(m.get("lp", {}).get("burned") for m in markets)
         lp_locked = any(m.get("lp", {}).get("locked") for m in markets)
@@ -327,7 +289,6 @@ def rugcheck_solana(token_address):
         else:
             warnings.append("⚠️ LP kilitli/yakılmamış")
             penalty += 20
-
         rc_score = data.get("score", 0)
         if rc_score < 300:
             warnings.append(f"🚨 RugCheck: {rc_score}"); penalty += 30
@@ -335,7 +296,6 @@ def rugcheck_solana(token_address):
             warnings.append(f"⚠️ RugCheck: {rc_score}"); penalty += 10
         elif rc_score >= 800:
             bonus += 10
-
         for risk in (data.get("risks") or []):
             lvl  = risk.get("level", "")
             name = risk.get("name", "")
@@ -343,13 +303,11 @@ def rugcheck_solana(token_address):
                 warnings.append(f"🚨 {name}"); penalty += 25
             elif lvl == "warn":
                 warnings.append(f"⚠️ {name}"); penalty += 8
-
     except Exception as e:
         print(f"RugCheck hata: {e}")
         warnings.append("🚫 RugCheck bağlantı hatası!")
         penalty += 100
     return warnings, penalty, bonus, api_success
-
 
 def tokensniffer_base(token_address):
     warnings    = []
@@ -365,15 +323,12 @@ def tokensniffer_base(token_address):
             warnings.append("🚫 TokenSniffer yanıt vermedi!")
             penalty += 100
             return warnings, penalty, bonus, api_success
-
         data        = r.json()
         api_success = True
-
         if data.get("is_honeypot"):
             warnings.append("🚨 HONEYPOT!"); penalty += 100
         if data.get("rugged"):
             warnings.append("🚨 Daha önce rug!"); penalty += 100
-
         ts = data.get("score", 100)
         if ts < 30:
             warnings.append(f"🚨 TokenSniffer: {ts}/100"); penalty += 50
@@ -381,19 +336,16 @@ def tokensniffer_base(token_address):
             warnings.append(f"⚠️ TokenSniffer: {ts}/100"); penalty += 20
         else:
             bonus += 10
-
         top10 = (data.get("holders") or {}).get("top10_percent", 0) or 0
         if top10 > MAX_TOP10_HOLDER_PCT:
             warnings.append(f"🚨 Top10 %{top10:.0f}!"); penalty += 40
         elif top10 > 25:
             warnings.append(f"⚠️ Top10 %{top10:.0f}"); penalty += 15
-
     except Exception as e:
         print(f"TokenSniffer hata: {e}")
         warnings.append("🚫 TokenSniffer bağlantı hatası!")
         penalty += 100
     return warnings, penalty, bonus, api_success
-
 
 def check_socials(pair):
     info    = pair.get("info") or {}
@@ -402,22 +354,18 @@ def check_socials(pair):
     has_tw  = any(s.get("type") == "twitter"  for s in socials)
     has_tg  = any(s.get("type") == "telegram" for s in socials)
     has_web = len(webs) > 0
-
     if not has_tw:
         return -999, []
-
     bonus    = 8 + (5 if has_tg else 0) + (7 if has_web else 0)
     warnings = []
     if not has_tg:  warnings.append("⚠️ Telegram yok")
     if not has_web: warnings.append("⚠️ Website yok")
     return bonus, warnings
 
-
 def calc_risk_score(rug_penalty, rug_bonus, mf_penalty, social_bonus, api_success):
-    base  = 100 if api_success else 50
+    base  = 100 if api_success else 0
     score = base - (rug_penalty + mf_penalty) + rug_bonus + max(0, social_bonus)
     return max(0, min(100, score))
-
 
 def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
     score   = 0
@@ -474,7 +422,7 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
             score += 20; reasons.append(f"👥 Çok güçlü alım (%{ratio*100:.0f})")
         elif ratio > 0.70:
             score += 15; reasons.append(f"👥 Güçlü alım (%{ratio*100:.0f})")
-        elif ratio > 0.65:
+        elif ratio > 0.60:
             score += 8;  reasons.append(f"👥 Alım baskısı (%{ratio*100:.0f})")
         elif ratio < 0.40:
             score -= 10; reasons.append("⚠️ Satış baskısı")
@@ -501,12 +449,10 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
 
     return max(0, min(100, score)), reasons
 
-
 def fetch_pairs():
     results = []
     for chain in ["solana", "base"]:
         try:
-            # Token profiles endpoint
             r = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10)
             if r.ok:
                 profiles = [p for p in (r.json() or []) if p.get("chainId") == chain and p.get("tokenAddress")]
@@ -526,8 +472,6 @@ def fetch_pairs():
                         time.sleep(0.3)
                     except Exception as e:
                         print(f"[{chain}] batch hata: {e}")
-
-            # Fallback: search endpoint
             for kw in ["pump", "new"]:
                 try:
                     r3 = requests.get(
@@ -542,11 +486,9 @@ def fetch_pairs():
                     time.sleep(0.2)
                 except Exception as e:
                     print(f"[{chain}] search hata: {e}")
-
         except Exception as e:
             print(f"[{chain}] fetch hata: {e}")
 
-    # Duplikat temizle
     seen_pairs = set()
     unique = []
     for p in results:
@@ -554,10 +496,8 @@ def fetch_pairs():
         if addr and addr not in seen_pairs:
             seen_pairs.add(addr)
             unique.append(p)
-
     print(f"Toplam {len(unique)} pair çekildi")
     return unique
-
 
 def send_telegram(msg):
     try:
@@ -569,13 +509,11 @@ def send_telegram(msg):
     except Exception as e:
         print(f"TG hata: {e}")
 
-
 def fmt(n):
     if not n: return "?"
     if n >= 1_000_000: return f"${n/1_000_000:.1f}M"
     if n >= 1_000:     return f"${n/1_000:.0f}K"
     return f"${n:.0f}"
-
 
 def scan():
     now_ms = time.time() * 1000
@@ -661,7 +599,6 @@ def scan():
             continue
 
         growth_bonus, growth_note = check_holder_growth(addr, buys5m)
-
         risk_score             = calc_risk_score(rug_penalty, rug_bonus, mf_penalty, social_bonus, api_ok)
         mom_score, mom_reasons = calc_momentum_score(pair, unique_buyers, growth_bonus, growth_note)
 
@@ -679,9 +616,8 @@ def scan():
         symbol      = (pair.get("baseToken") or {}).get("symbol", "?")
         dex_url     = pair.get("url", "")
         chain_label = "🟣 Solana" if "sol" in chain.lower() else "🔵 Base"
-
-        risk_icon = "🟢" if risk_score >= 75 else "🟡" if risk_score >= 55 else "🔴"
-        mom_icon  = "🔥" if mom_score  >= 70 else "📈" if mom_score  >= 45 else "📊"
+        risk_icon   = "🟢" if risk_score >= 75 else "🟡" if risk_score >= 55 else "🔴"
+        mom_icon    = "🔥" if mom_score  >= 70 else "📈" if mom_score  >= 45 else "📊"
 
         all_warnings = mf_warnings + cs_warnings + rug_warnings + social_warnings
         mom_txt      = "\n".join(f"  • {r}" for r in mom_reasons[:5])
@@ -723,18 +659,17 @@ def scan():
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti — {found} yeni token")
 
-
 def main():
     print("=" * 55)
-    print("  SIGNAL Bot v13")
+    print("  SIGNAL Bot v14")
     print("=" * 55)
     send_telegram(
-        "🤖 <b>SIGNAL Bot v13 başlatıldı</b>\n\n"
-        "  ✅ Fetch fallback eklendi\n"
-        "  ✅ Min likidite $25K\n"
-        "  ✅ Buy oranı min %65\n"
-        "  ✅ 1sa trend pozitif zorunlu\n"
-        "  ✅ RugCheck hata → geçmez\n\n"
+        "🤖 <b>SIGNAL Bot v14 başlatıldı</b>\n\n"
+        "  ✅ Risk skoru 65 → 55\n"
+        "  ✅ Buy oranı 65% → 60%\n"
+        "  ✅ Min unique buyers 10 → 5\n"
+        "  ✅ RugCheck hata → risk=0 (geçmez)\n"
+        "  ✅ 1sa negatif → eleme\n\n"
         "Solana + Base 🚀"
     )
     while True:
@@ -743,7 +678,6 @@ def main():
         except Exception as e:
             print(f"Ana hata: {e}")
         time.sleep(SCAN_INTERVAL)
-
 
 if __name__ == "__main__":
     main()
