@@ -540,7 +540,7 @@ def scan():
         if liq      < MIN_LIQUIDITY_USD: continue
         if vol5m    < MIN_VOLUME_5M:     continue
         if change5m < MIN_CHANGE_5M:     continue
-        if change1h < 0:                 continue
+        
 
         total_tx  = buys5m + sells5m
         buy_ratio = buys5m / total_tx if total_tx > 0 else 0
