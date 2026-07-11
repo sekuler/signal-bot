@@ -451,6 +451,8 @@ def calc_momentum_score(pair, unique_buyers=0, growth_bonus=0, growth_note=""):
 
 def fetch_pairs():
     results = []
+
+    # 1. DexScreener token profiles
     for chain in ["solana", "base"]:
         try:
             r = requests.get("https://api.dexscreener.com/token-profiles/latest/v1", timeout=10)
@@ -472,23 +474,85 @@ def fetch_pairs():
                         time.sleep(0.3)
                     except Exception as e:
                         print(f"[{chain}] batch hata: {e}")
-            for kw in ["pump", "new"]:
-                try:
-                    r3 = requests.get(
-                        f"https://api.dexscreener.com/latest/dex/search?q={kw}&chainId={chain}",
-                        timeout=10
-                    )
-                    if r3.ok:
-                        pairs = r3.json().get("pairs") or []
-                        for p in pairs:
-                            p["_chain"] = chain
-                        results.extend(pairs)
-                    time.sleep(0.2)
-                except Exception as e:
-                    print(f"[{chain}] search hata: {e}")
         except Exception as e:
-            print(f"[{chain}] fetch hata: {e}")
+            print(f"[{chain}] profiles hata: {e}")
 
+    # 2. DexScreener search
+    for chain in ["solana", "base"]:
+        for kw in ["pump", "new", "sol", "base", "pepe", "dog", "cat", "moon", "ai"]:
+            try:
+                r = requests.get(
+                    f"https://api.dexscreener.com/latest/dex/search?q={kw}&chainId={chain}",
+                    timeout=10
+                )
+                if r.ok:
+                    pairs = r.json().get("pairs") or []
+                    for p in pairs:
+                        p["_chain"] = chain
+                    results.extend(pairs)
+                time.sleep(0.2)
+            except Exception as e:
+                print(f"[{chain}] search hata: {e}")
+
+    # 3. Uniswap V3 yeni pool'ları (Base)
+    try:
+        query = """
+        {
+          pools(
+            first: 50
+            orderBy: createdAtTimestamp
+            orderDirection: desc
+            where: { createdAtTimestamp_gt: %d }
+          ) {
+            id
+            token0 { id symbol name }
+            token1 { id symbol name }
+            createdAtTimestamp
+            totalValueLockedUSD
+            volumeUSD
+          }
+        }
+        """ % (int(time.time()) - 3600)
+
+        r = requests.post(
+            "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3-base",
+            json={"query": query},
+            timeout=10
+        )
+        if r.ok:
+            pools = (r.json().get("data") or {}).get("pools") or []
+            for pool in pools:
+                token0 = pool.get("token0") or {}
+                token1 = pool.get("token1") or {}
+                liq    = float(pool.get("totalValueLockedUSD") or 0)
+                if liq < MIN_LIQUIDITY_USD:
+                    continue
+                if token0.get("symbol") in ["WETH", "USDC", "USDbC"]:
+                    base_token = token1
+                else:
+                    base_token = token0
+                fake_pair = {
+                    "_chain": "base",
+                    "pairAddress": pool.get("id", ""),
+                    "baseToken": {
+                        "address": base_token.get("id", ""),
+                        "symbol":  base_token.get("symbol", ""),
+                        "name":    base_token.get("name", ""),
+                    },
+                    "liquidity":   {"usd": liq},
+                    "volume":      {"m5": 0, "h1": float(pool.get("volumeUSD") or 0)},
+                    "priceChange": {"m5": 0, "h1": 0},
+                    "txns":        {"m5": {"buys": 0, "sells": 0}},
+                    "pairCreatedAt": int(pool.get("createdAtTimestamp", 0)) * 1000,
+                    "url": f"https://dexscreener.com/base/{pool.get('id', '')}",
+                    "info": {"socials": [], "websites": []},
+                }
+                results.append(fake_pair)
+            print(f"[base] Uniswap V3'ten {len(pools)} pool çekildi")
+    except Exception as e:
+        print(f"[base] Uniswap subgraph hata: {e}")
+
+    # Duplikat temizle
     seen_pairs = set()
     unique = []
     for p in results:
@@ -496,6 +560,7 @@ def fetch_pairs():
         if addr and addr not in seen_pairs:
             seen_pairs.add(addr)
             unique.append(p)
+
     print(f"Toplam {len(unique)} pair çekildi")
     return unique
 
@@ -540,7 +605,6 @@ def scan():
         if liq      < MIN_LIQUIDITY_USD: continue
         if vol5m    < MIN_VOLUME_5M:     continue
         if change5m < MIN_CHANGE_5M:     continue
-        
 
         total_tx  = buys5m + sells5m
         buy_ratio = buys5m / total_tx if total_tx > 0 else 0
@@ -661,15 +725,13 @@ def scan():
 
 def main():
     print("=" * 55)
-    print("  SIGNAL Bot v14")
+    print("  SIGNAL Bot v15")
     print("=" * 55)
     send_telegram(
-        "🤖 <b>SIGNAL Bot v14 başlatıldı</b>\n\n"
-        "  ✅ Risk skoru 65 → 55\n"
-        "  ✅ Buy oranı 65% → 60%\n"
-        "  ✅ Min unique buyers 10 → 5\n"
-        "  ✅ RugCheck hata → risk=0 (geçmez)\n"
-        "  ✅ 1sa negatif → eleme\n\n"
+        "🤖 <b>SIGNAL Bot v15 başlatıldı</b>\n\n"
+        "  ✅ Uniswap V3 Base pool'ları eklendi\n"
+        "  ✅ Daha fazla keyword ile tarama\n"
+        "  ✅ 1sa filtresi kaldırıldı\n\n"
         "Solana + Base 🚀"
     )
     while True:
