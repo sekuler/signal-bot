@@ -8,11 +8,12 @@ TELEGRAM_TOKEN = "8892190725:AAFmzgGnH5L-ZDmepaIA1uYpxM5Bbzy7X4A"
 CHAT_ID        = "1590986571"
 SCAN_INTERVAL  = 60
 SEEN_FILE      = "seen_tokens.json"
+SOLANA_RPC     = "https://api.mainnet-beta.solana.com"
 
 MIN_LIQUIDITY  = 25000
 MIN_VOLUME_5M  = 3000
 MIN_CHANGE_5M  = 3.0
-MIN_BUY_RATIO  = 0.55
+MIN_BUY_RATIO  = 0.60
 MAX_AGE_MIN    = 360
 WAIT_SECONDS   = 60
 
@@ -37,16 +38,44 @@ def save_seen():
 
 seen = load_seen()
 
+def rugcheck(token_address):
+    """Solana rug kontrolü. False dönerse token elensin."""
+    try:
+        r = requests.get(
+            f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary",
+            timeout=10
+        )
+        if not r.ok:
+            print(f"[RUGCHECK] API hata {r.status_code} — token elendi")
+            return False, "🚫 RugCheck yanıt vermedi"
+
+        data  = r.json()
+        score = data.get("score", 0)
+        risks = data.get("risks") or []
+
+        warnings = []
+        for risk in risks:
+            if risk.get("level") in ["danger", "critical"]:
+                warnings.append(f"🚨 {risk.get('name', '')}")
+
+        if warnings:
+            return False, "\n".join(warnings)
+
+        if score < 500:
+            return False, f"⚠️ RugCheck skoru düşük: {score}"
+
+        return True, f"✅ RugCheck: {score}"
+
+    except Exception as e:
+        print(f"[RUGCHECK] Bağlantı hatası: {e} — token elendi")
+        return False, "🚫 RugCheck bağlantı hatası"
+
 def check_socials(pair):
     info    = pair.get("info") or {}
     socials = info.get("socials") or []
     webs    = info.get("websites") or []
     has_tw  = any(s.get("type") == "twitter" for s in socials)
-    has_tg  = any(s.get("type") == "telegram" for s in socials)
-    has_web = len(webs) > 0
-    if not has_tw:
-        return False
-    return True
+    return has_tw
 
 def fetch_pairs():
     results = []
@@ -145,6 +174,7 @@ def scan():
         total_tx  = buys5m + sells5m
         buy_ratio = buys5m / total_tx if total_tx > 0 else 0
         if buy_ratio < MIN_BUY_RATIO:
+            seen.add(addr)
             continue
 
         if not check_socials(pair):
@@ -158,12 +188,23 @@ def scan():
         if now_s - pending[addr] < WAIT_SECONDS:
             continue
 
+        token_ca = (pair.get("baseToken") or {}).get("address", "")
+
+        # RugCheck — sadece Solana
+        rug_note = ""
+        if chain == "solana" and token_ca:
+            ok, rug_note = rugcheck(token_ca)
+            if not ok:
+                seen.add(addr)
+                pending.pop(addr, None)
+                print(f"[SKIP-RUG] {(pair.get('baseToken') or {}).get('symbol')}: {rug_note}")
+                continue
+
         seen.add(addr)
         pending.pop(addr, None)
         save_seen()
         found += 1
 
-        token_ca    = (pair.get("baseToken") or {}).get("address", "")
         symbol      = (pair.get("baseToken") or {}).get("symbol", "?")
         dex_url     = pair.get("url", "")
         chain_label = "🟣 Solana" if "sol" in chain.lower() else "🔵 Base"
@@ -187,21 +228,22 @@ def scan():
             f"💰 Likidite: {fmt(liq)}\n"
             f"📊 5dk Hacim: {fmt(vol5m)}\n"
             f"📈 5dk: %{change5m:+.2f}  |  1sa: %{change1h:+.2f}\n"
-            f"👥 Buy/Sell: {buys5m}/{sells5m} (%{buy_ratio*100:.0f} buy)\n\n"
+            f"👥 Buy/Sell: {buys5m}/{sells5m} (%{buy_ratio*100:.0f} buy)\n"
+            f"{rug_note}\n\n"
             f"{links}\n"
             f"🔗 <a href='{dex_url}'>DexScreener</a>"
         )
 
         send_telegram(msg)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {symbol} ({chain})")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {symbol} ({chain}) buy%:{buy_ratio*100:.0f}")
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti — {found} yeni token")
 
 def main():
     print("=" * 50)
-    print("  SIGNAL Bot — Sade Versiyon")
+    print("  SIGNAL Bot — RugCheck Filtreli")
     print("=" * 50)
-    send_telegram("🤖 <b>SIGNAL Bot başlatıldı</b>\n\nSolana + Base 🚀")
+    send_telegram("🤖 <b>SIGNAL Bot başlatıldı</b>\n\n✅ RugCheck aktif\n\nSolana + Base 🚀")
     while True:
         try:
             scan()
